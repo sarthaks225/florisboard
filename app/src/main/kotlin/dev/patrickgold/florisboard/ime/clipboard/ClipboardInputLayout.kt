@@ -16,16 +16,9 @@
 
 package dev.patrickgold.florisboard.ime.clipboard
 
-import android.content.ContentUris
-import android.graphics.BitmapFactory
-import android.media.MediaMetadataRetriever
-import android.media.ThumbnailUtils
-import android.provider.MediaStore
-import android.util.Size
 import androidx.annotation.StringRes
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.detectTapGestures
@@ -62,6 +55,8 @@ import androidx.compose.material.icons.filled.TextFields
 import androidx.compose.material.icons.filled.ToggleOff
 import androidx.compose.material.icons.filled.ToggleOn
 import androidx.compose.material.icons.filled.Videocam
+import androidx.compose.material.icons.filled.Visibility
+import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material.icons.outlined.ContentPasteGo
 import androidx.compose.material.icons.outlined.Email
 import androidx.compose.material.icons.outlined.PushPin
@@ -80,18 +75,17 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.dp
+import coil3.compose.AsyncImage
 import dev.patrickgold.florisboard.R
 import dev.patrickgold.florisboard.app.FlorisPreferenceStore
 import dev.patrickgold.florisboard.clipboardManager
 import dev.patrickgold.florisboard.ime.ImeUiMode
-import dev.patrickgold.florisboard.ime.clipboard.provider.ClipboardFileStorage
 import dev.patrickgold.florisboard.ime.clipboard.provider.ClipboardItem
 import dev.patrickgold.florisboard.ime.clipboard.provider.ItemType
 import dev.patrickgold.florisboard.ime.keyboard.FlorisImeSizing
@@ -104,13 +98,13 @@ import dev.patrickgold.florisboard.ime.smartbar.AnimationDuration
 import dev.patrickgold.florisboard.ime.smartbar.VerticalEnterTransition
 import dev.patrickgold.florisboard.ime.smartbar.VerticalExitTransition
 import dev.patrickgold.florisboard.ime.theme.FlorisImeUi
+import dev.patrickgold.florisboard.ime.theme.ImeUiAttrs
 import dev.patrickgold.florisboard.lib.observeAsTransformingState
 import dev.patrickgold.florisboard.lib.util.NetworkUtils
 import dev.patrickgold.jetpref.datastore.model.collectAsState
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import org.florisboard.lib.android.AndroidKeyguardManager
-import org.florisboard.lib.android.AndroidVersion
 import org.florisboard.lib.android.systemService
 import org.florisboard.lib.compose.LocalLocalizedDateTimeFormatter
 import org.florisboard.lib.compose.autoMirrorForRtl
@@ -127,7 +121,9 @@ import org.florisboard.lib.snygg.ui.SnyggIcon
 import org.florisboard.lib.snygg.ui.SnyggIconButton
 import org.florisboard.lib.snygg.ui.SnyggRow
 import org.florisboard.lib.snygg.ui.SnyggText
+import org.florisboard.lib.snygg.ui.rememberImageRequest
 import java.time.Instant
+import kotlin.time.Duration.Companion.milliseconds
 
 private val ItemWidth = 200.dp
 private val DialogWidth = 240.dp
@@ -148,11 +144,14 @@ fun ClipboardInputLayout(
 
     val deviceLocked = androidKeyguardManager.let { it.isDeviceLocked || it.isKeyguardLocked }
     val historyEnabled by prefs.clipboard.historyEnabled.collectAsState()
+    val historyShowSensitiveEnabled by prefs.clipboard.historyShowSensitiveEnabled.collectAsState()
 
     var isFilterRowShown by remember { mutableStateOf(false) }
+    var isSensitiveRevealed by remember { mutableStateOf(false) }
     val activeFilterTypes = remember { mutableStateSetOf<ItemType>() }
 
     val unfilteredHistory by clipboardManager.historyFlow.collectAsState()
+    val hasSensitiveItems = unfilteredHistory.all.any { it.isSensitive }
     val filteredHistory = remember(unfilteredHistory, activeFilterTypes.toSet()) {
         if (activeFilterTypes.isEmpty()) {
             unfilteredHistory
@@ -170,9 +169,15 @@ fun ClipboardInputLayout(
     fun isPopupSurfaceActive() = popupItem != null || showClearAllHistory
 
     LaunchedEffect(isFilterRowShown) {
-        delay(AnimationDuration.toLong())
+        delay(AnimationDuration.milliseconds)
         if (!isFilterRowShown) {
             activeFilterTypes.clear()
+        }
+    }
+
+    LaunchedEffect(hasSensitiveItems) {
+        if (!hasSensitiveItems) {
+            isSensitiveRevealed = false
         }
     }
 
@@ -225,6 +230,22 @@ fun ClipboardInputLayout(
                     },
                 )
             }
+            if (!historyShowSensitiveEnabled) {
+                SnyggIconButton(
+                    elementName = FlorisImeUi.ClipboardHeaderButton.elementName,
+                    onClick = { isSensitiveRevealed = !isSensitiveRevealed },
+                    modifier = sizeModifier,
+                    enabled = !deviceLocked && historyEnabled && !isPopupSurfaceActive() && hasSensitiveItems,
+                ) {
+                    SnyggIcon(
+                        imageVector = if (isSensitiveRevealed) {
+                            Icons.Default.Visibility
+                        } else {
+                            Icons.Default.VisibilityOff
+                        },
+                    )
+                }
+            }
             SnyggIconButton(
                 elementName = FlorisImeUi.ClipboardHeaderButton.elementName,
                 onClick = { showClearAllHistory = true },
@@ -264,8 +285,10 @@ fun ClipboardInputLayout(
         contentScrollInsteadOfClip: Boolean,
         modifier: Modifier = Modifier,
     ) {
-        val attributes = remember(item) {
-            mapOf("type" to item.type.toString().lowercase())
+        val attributes = remember(item.type) {
+            mapOf(
+                ImeUiAttrs.ClipboardItemType.eq(item.type),
+            )
         }
         SnyggBox(
             elementName = elementName,
@@ -283,70 +306,40 @@ fun ClipboardInputLayout(
                 },
             ),
         ) {
-            if (item.type == ItemType.IMAGE) {
-                val id = ContentUris.parseId(item.uri!!)
-                val file = ClipboardFileStorage.getFileForId(context, id)
-                val bitmap = remember(id) {
-                    runCatching {
-                        check(file.exists()) { "Unable to resolve image at ${file.absolutePath}" }
-                        val rawBitmap = BitmapFactory.decodeFile(file.absolutePath)
-                        checkNotNull(rawBitmap) { "Unable to decode image at ${file.absolutePath}" }
-                        rawBitmap.asImageBitmap()
-                    }
-                }
-                if (bitmap.isSuccess) {
-                    Image(
+            if (item.type == ItemType.IMAGE || item.type == ItemType.VIDEO) {
+                val uri = item.uri!!
+                var errorMessage: String? by remember(uri) { mutableStateOf(null) }
+
+                val itemType = item.type.name.lowercase()
+                val isVideo = item.type == ItemType.VIDEO
+
+                val errorText = errorMessage
+                if (errorText == null) {
+                    AsyncImage(
+                        model = rememberImageRequest(uri, useFirstFrame = isVideo),
+                        contentDescription = "Clipboard media item with type $itemType",
+                        onError = { state ->
+                            errorMessage = state.result.throwable.message
+                                ?: "Unable to load $itemType at $uri"
+                        },
                         modifier = Modifier.fillMaxWidth(),
-                        bitmap = bitmap.getOrThrow(),
-                        contentDescription = null,
                         contentScale = ContentScale.FillWidth,
                     )
+                    if (isVideo) {
+                        Icon(
+                            modifier = Modifier
+                                .align(Alignment.TopEnd)
+                                .padding(top = 4.dp, end = 4.dp)
+                                .background(Color.White, CircleShape),
+                            imageVector = Icons.Default.Videocam,
+                            contentDescription = "Videocam Icon",
+                            tint = Color.Black,
+                        )
+                    }
                 } else {
                     SnyggText(
                         modifier = Modifier.fillMaxWidth(),
-                        text = bitmap.exceptionOrNull()?.message ?: "Unknown error",
-                    )
-                }
-            } else if (item.type == ItemType.VIDEO) {
-                val id = ContentUris.parseId(item.uri!!)
-                val file = ClipboardFileStorage.getFileForId(context, id)
-                val bitmap = remember(id) {
-                    runCatching {
-                        check(file.exists()) { "Unable to resolve video at ${file.absolutePath}" }
-                        val rawBitmap = if (AndroidVersion.ATLEAST_API29_Q) {
-                            val dataRetriever = MediaMetadataRetriever()
-                            dataRetriever.setDataSource(file.absolutePath)
-                            val width = dataRetriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)
-                            val height = dataRetriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)
-                            ThumbnailUtils.createVideoThumbnail(file, Size(width!!.toInt(), height!!.toInt()), null)
-                        } else {
-                            @Suppress("DEPRECATION")
-                            ThumbnailUtils.createVideoThumbnail(file.absolutePath, MediaStore.Video.Thumbnails.MINI_KIND)
-                        }
-                        checkNotNull(rawBitmap) { "Unable to decode video at ${file.absolutePath}" }
-                        rawBitmap.asImageBitmap()
-                    }
-                }
-                if (bitmap.isSuccess) {
-                    Image(
-                        modifier = Modifier.fillMaxWidth(),
-                        bitmap = bitmap.getOrThrow(),
-                        contentDescription = null,
-                        contentScale = ContentScale.FillWidth,
-                    )
-                    Icon(
-                        modifier = Modifier
-                            .align(Alignment.BottomStart)
-                            .padding(start = 4.dp, bottom = 4.dp)
-                            .background(Color.White, CircleShape),
-                        imageVector = Icons.Default.Videocam,
-                        contentDescription = null,
-                        tint = Color.Black,
-                    )
-                } else {
-                    SnyggText(
-                        modifier = Modifier.fillMaxWidth(),
-                        text = bitmap.exceptionOrNull()?.message ?: "Unknown error",
+                        text = errorText,
                     )
                 }
             } else {
@@ -361,7 +354,7 @@ fun ClipboardInputLayout(
                         modifier = Modifier
                             .fillMaxWidth()
                             .run { if (contentScrollInsteadOfClip) this.florisVerticalScroll() else this },
-                        text = item.displayText(),
+                        text = item.displayText(showSensitive = historyShowSensitiveEnabled || isSensitiveRevealed),
                     )
                 }
             }
@@ -424,10 +417,10 @@ fun ClipboardInputLayout(
                             itemType: ItemType,
                         ) {
                             val active = activeFilterTypes.contains(itemType)
-                            val attributes = remember(active) {
+                            val attributes = remember(active, itemType) {
                                 mapOf(
-                                    "state" to if (active) "active" else "inactive",
-                                    "type" to itemType.toString().lowercase(),
+                                    ImeUiAttrs.ClipboardFilterState.eq(active),
+                                    ImeUiAttrs.ClipboardItemType.eq(itemType),
                                 )
                             }
                             SnyggChip(
@@ -584,7 +577,11 @@ fun ClipboardInputLayout(
                             Spacer(modifier = Modifier.weight(1f))
                             SnyggButton(
                                 elementName = FlorisImeUi.ClipboardClearAllDialogButton.elementName,
-                                attributes = mapOf("action" to "no"),
+                                attributes = remember {
+                                    mapOf(
+                                        ImeUiAttrs.ClipboardDialogAction.eq(false),
+                                    )
+                                },
                                 onClick = {
                                     showClearAllHistory = false
                                 },
@@ -596,7 +593,11 @@ fun ClipboardInputLayout(
                             val clearedHistoryMsg = stringRes(R.string.clipboard__cleared_history)
                             SnyggButton(
                                 elementName = FlorisImeUi.ClipboardClearAllDialogButton.elementName,
-                                attributes = mapOf("action" to "yes"),
+                                attributes = remember {
+                                    mapOf(
+                                        ImeUiAttrs.ClipboardDialogAction.eq(true),
+                                    )
+                                },
                                 onClick = {
                                     scope.launch {
                                         clipboardManager.clearExactHistory(filteredHistory.unpinned)

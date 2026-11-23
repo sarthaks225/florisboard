@@ -60,6 +60,7 @@ import kotlinx.coroutines.runBlocking
 import org.florisboard.lib.kotlin.collectIn
 import org.k3lp.lib.text.K3Descriptor
 import org.k3lp.lib.text.K3String
+import org.k3lp.lib.text.K3StringOrDescriptor
 import org.k3lp.lib.text.asK3String
 import org.k3lp.model.K3Model
 import org.k3lp.model.layer.K3LayerId
@@ -68,6 +69,8 @@ import org.k3lp.runtime.K3InputMethod
 import org.k3lp.runtime.K3SurroundingText
 import org.k3lp.runtime.K3TextRange
 import java.lang.ref.WeakReference
+import kotlin.concurrent.atomics.AtomicReference
+import kotlin.concurrent.atomics.ExperimentalAtomicApi
 
 /**
  * Provides the [ImeController] instance this composition tree is associated with.
@@ -76,6 +79,7 @@ val LocalImeController = staticCompositionLocalOf<ImeController> {
     error("No IME controller is associated with this composition tree.")
 }
 
+@OptIn(ExperimentalAtomicApi::class)
 class ImeController(
     storageController: StorageController,
     val clipboardManager: ClipboardManager, // TODO ClipboardController
@@ -88,6 +92,7 @@ class ImeController(
     private val scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
     private val breakIterators = BreakIterators()
     private val expectedContentQueue = ExpectedContentQueue()
+    private var emitInterceptor = AtomicReference<EmitInterceptor?>(null)
 
     val activeTouchModelOptions = combine<Any, TouchModelOptions>(
         prefs.keyboard.numberRow.asFlow(),
@@ -168,6 +173,10 @@ class ImeController(
             // TODO KeyEvent.KEYCODE_SHIFT_LEFT, KeyEvent.KEYCODE_SHIFT_RIGHT
             else -> false
         }
+    }
+
+    fun setEmitInterceptor(interceptor: EmitInterceptor?) {
+        emitInterceptor.store(interceptor)
     }
 
     fun snapshotState(): ImeState = activeState.value
@@ -298,6 +307,15 @@ class ImeController(
             expectedContentQueue.push(state.content)
         }
 
+        override fun emit(value: K3StringOrDescriptor) {
+            val interceptor = emitInterceptor.load()
+            if (interceptor != null) {
+                interceptor.onEmit(value)
+                return
+            }
+            super.emit(value)
+        }
+
         override fun emitText(value: K3String) {
             super.emitText(value)
             expectedContentQueue.push(state.content)
@@ -354,6 +372,12 @@ class ImeController(
                     //  appContext.showShortToastSync(R.string.clipboard__cleared_primary_clip)
                 }
                 ImeActions.SelectAll -> state.editor.performSelectAll()
+                ImeActions.Share -> {
+                    val text = state.content.surroundingText.textSelected
+                    if (text.isNotEmpty()) {
+                        state.editor.performTextShare()
+                    }
+                }
                 ImeActions.ShowImeWindow -> FlorisImeService.showUi()
                 ImeActions.HideImeWindow -> FlorisImeService.hideUi()
                 ImeActions.ShowTextPanel -> {
@@ -639,6 +663,10 @@ enum class OperationUnit {
 enum class OperationScope {
     BEFORE_CURSOR,
     AFTER_CURSOR;
+}
+
+fun interface EmitInterceptor {
+    fun onEmit(value: K3StringOrDescriptor)
 }
 
 private class ExpectedContentQueue {
